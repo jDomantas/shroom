@@ -85,85 +85,128 @@ impl Instr {
     }
 
     pub fn decode(bytes: &[u8]) -> Option<Self> {
-        match *bytes {
-            [0x58, ..] => Some(Instr::PopRax),
-            [0x5B, ..] => Some(Instr::PopRbx),
-            [0x5D, ..] => Some(Instr::PopRbp),
-            [0x5A, ..] => Some(Instr::PopRdx),
-            [0x50, ..] => Some(Instr::PushRax),
-            [0x53, ..] => Some(Instr::PushRbx),
-            [0x55, ..] => Some(Instr::PushRbp),
-            [0x52, ..] => Some(Instr::PushRdx),
-            [0x48, 0x01, 0xD8, ..] => Some(Instr::AddRaxRbx),
-            [0x48, 0x29, 0xD8, ..] => Some(Instr::SubRaxRbx),
-            [0x48, 0xF7, 0xE3, ..] => Some(Instr::MulRbx),
-            [0x48, 0xF7, 0xF3, ..] => Some(Instr::DivRbx),
-            [0xFF, 0x30, ..] => Some(Instr::PushQwordRax),
-            [0xFF, 0xB0, a0, a1, a2, a3, ..] => {
-                let arg = four_byte_sign_extend(a3, a2, a1, a0);
-                Some(Instr::PushQwordRaxOffset(arg))
+        if bytes.len() >= 1 {
+            match bytes[0] {
+                0x58 => return Some(Instr::PopRax),
+                0x5B => return Some(Instr::PopRbx),
+                0x5D => return Some(Instr::PopRbp),
+                0x5A => return Some(Instr::PopRdx),
+                0x50 => return Some(Instr::PushRax),
+                0x53 => return Some(Instr::PushRbx),
+                0x55 => return Some(Instr::PushRbp),
+                0x52 => return Some(Instr::PushRdx),
+                0xC3 => return Some(Instr::Ret),
+                _ => {}
             }
-            [0x48, 0x8B, 0x84, 0x24, a0, a1, a2, a3, ..] => {
-                let arg = four_byte_sign_extend(a3, a2, a1, a0);
-                Some(Instr::MovRaxRspOffset(arg))
-            }
-            [0x48, 0x89, 0x98, a0, a1, a2, a3, ..] => {
-                let arg = four_byte_sign_extend(a3, a2, a1, a0);
-                Some(Instr::MovRaxOffsetRbx(arg))
-            }
-            [0x48, 0x81, 0xC4, a0, a1, a2, a3, ..] => {
-                let arg = four_byte_sign_extend(a3, a2, a1, a0);
-                Some(Instr::AddRsp(arg))
-            }
-            [0x48, 0x81, 0xEC, a0, a1, a2, a3, ..] => {
-                let arg = four_byte_sign_extend(a3, a2, a1, a0);
-                Some(Instr::SubRsp(arg))
-            }
-            [0x48, 0x39, 0xD8, ..] => Some(Instr::CmpRaxRbx),
-            [0x0F, 0x94, 0xC2, ..] => Some(Instr::SeteDl),
-            [0x48, 0x31, 0xC0, ..] => Some(Instr::XorRaxRax),
-            [0x48, 0x31, 0xD2, ..] => Some(Instr::XorRdxRdx),
-            [0x0F, 0x95, 0xC2, ..] => Some(Instr::SetneDl),
-            [0x0F, 0x92, 0xC2, ..] => Some(Instr::SetbDl),
-            [0x48, 0xB8, a0, a1, a2, a3, a4, a5, a6, a7, ..] => {
-                let arg = eight_byte(a7, a6, a5, a4, a3, a2, a1, a0);
-                Some(Instr::MovRax(arg))
-            }
-            [0x48, 0x85, 0xC0, ..] => Some(Instr::TestRaxRax),
-            [0xE8, a0, a1, a2, a3, ..] => {
-                let arg = four_byte_sign_extend(a3, a2, a1, a0);
-                Some(Instr::Call(arg))
-            }
-            [0xE9, a0, a1, a2, a3, ..] => {
-                let arg = four_byte_sign_extend(a3, a2, a1, a0);
-                Some(Instr::Jmp(arg))
-            }
-            [0x0F, 0x85, a0, a1, a2, a3, ..] => {
-                let arg = four_byte_sign_extend(a3, a2, a1, a0);
-                Some(Instr::Jnz(arg))
-            }
-            [0x0F, 0x84, a0, a1, a2, a3, ..] => {
-                let arg = four_byte_sign_extend(a3, a2, a1, a0);
-                Some(Instr::Jz(arg))
-            }
-            [0xC3, ..] => Some(Instr::Ret),
-            [0x48, 0x8D, 0x85, a0, a1, a2, a3, ..] => {
-                let arg = four_byte_sign_extend(a3, a2, a1, a0);
-                Some(Instr::LeaRaxRbpOffset(arg))
-            }
-            [0x48, 0x8B, 0x9C, 0x04, a0, a1, a2, a3, ..] => {
-                let arg = four_byte_sign_extend(a3, a2, a1, a0);
-                Some(Instr::MovRbxRspRaxOffset(arg))
-            }
-            [0x48, 0x89, 0x9C, 0x24, a0, a1, a2, a3, ..] => {
-                let arg = four_byte_sign_extend(a3, a2, a1, a0);
-                Some(Instr::MovRspOffsetRbx(arg))
-            }
-            [0x48, 0x8B, 0x04, 0x24, ..] => Some(Instr::MovRaxQwordRsp),
-            [0x48, 0x89, 0xE5, ..] => Some(Instr::MovRbpRsp),
-            [0x0F, 0x05, ..] => Some(Instr::Syscall),
-            _ => None,
         }
+        if bytes.len() >= 2 {
+            match (bytes[0], bytes[1]) {
+                (0xFF, 0x30) => return Some(Instr::PushQwordRax),
+                (0x0F, 0x05) => return Some(Instr::Syscall),
+                _ => {}
+            }
+        }
+        if bytes.len() >= 3 {
+            match (bytes[0], bytes[1], bytes[2]) {
+                (0x48, 0x01, 0xD8) => return Some(Instr::AddRaxRbx),
+                (0x48, 0x29, 0xD8) => return Some(Instr::SubRaxRbx),
+                (0x48, 0xF7, 0xE3) => return Some(Instr::MulRbx),
+                (0x48, 0xF7, 0xF3) => return Some(Instr::DivRbx),
+                (0x48, 0x39, 0xD8) => return Some(Instr::CmpRaxRbx),
+                (0x0F, 0x94, 0xC2) => return Some(Instr::SeteDl),
+                (0x48, 0x31, 0xC0) => return Some(Instr::XorRaxRax),
+                (0x48, 0x31, 0xD2) => return Some(Instr::XorRdxRdx),
+                (0x0F, 0x95, 0xC2) => return Some(Instr::SetneDl),
+                (0x0F, 0x92, 0xC2) => return Some(Instr::SetbDl),
+                (0x48, 0x85, 0xC0) => return Some(Instr::TestRaxRax),
+                (0x48, 0x89, 0xE5) => return Some(Instr::MovRbpRsp),
+                _ => {}
+            }
+        }
+        if bytes.len() >= 4 {
+            match (bytes[0], bytes[1], bytes[2], bytes[3]) {
+                (0x48, 0x8B, 0x04, 0x24) => return Some(Instr::MovRaxQwordRsp),
+                _ => {}
+            }
+        }
+        if bytes.len() >= 5 {
+            match (bytes[0], bytes[1], bytes[2], bytes[3], bytes[4]) {
+                (0xE8, a0, a1, a2, a3) => {
+                    let arg = four_byte_sign_extend(a3, a2, a1, a0);
+                    return Some(Instr::Call(arg));
+                }
+                (0xE9, a0, a1, a2, a3) => {
+                    let arg = four_byte_sign_extend(a3, a2, a1, a0);
+                    return Some(Instr::Jmp(arg));
+                }
+                _ => {}
+            }
+        }
+        if bytes.len() >= 6 {
+            match (bytes[0], bytes[1], bytes[2], bytes[3], bytes[4], bytes[5]) {
+                (0xFF, 0xB0, a0, a1, a2, a3) => {
+                    let arg = four_byte_sign_extend(a3, a2, a1, a0);
+                    return Some(Instr::PushQwordRaxOffset(arg));
+                }
+                (0x0F, 0x85, a0, a1, a2, a3) => {
+                    let arg = four_byte_sign_extend(a3, a2, a1, a0);
+                    return Some(Instr::Jnz(arg));
+                }
+                (0x0F, 0x84, a0, a1, a2, a3) => {
+                    let arg = four_byte_sign_extend(a3, a2, a1, a0);
+                    return Some(Instr::Jz(arg));
+                }
+                _ => {}
+            }
+        }
+        if bytes.len() >= 7 {
+            match (bytes[0], bytes[1], bytes[2], bytes[3], bytes[4], bytes[5], bytes[6]) {
+                (0x48, 0x89, 0x98, a0, a1, a2, a3) => {
+                    let arg = four_byte_sign_extend(a3, a2, a1, a0);
+                    return Some(Instr::MovRaxOffsetRbx(arg));
+                }
+                (0x48, 0x81, 0xC4, a0, a1, a2, a3) => {
+                    let arg = four_byte_sign_extend(a3, a2, a1, a0);
+                    return Some(Instr::AddRsp(arg));
+                }
+                (0x48, 0x81, 0xEC, a0, a1, a2, a3) => {
+                    let arg = four_byte_sign_extend(a3, a2, a1, a0);
+                    return Some(Instr::SubRsp(arg));
+                }
+                (0x48, 0x8D, 0x85, a0, a1, a2, a3) => {
+                    let arg = four_byte_sign_extend(a3, a2, a1, a0);
+                    return Some(Instr::LeaRaxRbpOffset(arg));
+                }
+                _ => {}
+            }
+        }
+        if bytes.len() >= 8 {
+            match (bytes[0], bytes[1], bytes[2], bytes[3], bytes[4], bytes[5], bytes[6], bytes[7]) {
+                (0x48, 0x8B, 0x84, 0x24, a0, a1, a2, a3) => {
+                    let arg = four_byte_sign_extend(a3, a2, a1, a0);
+                    return Some(Instr::MovRaxRspOffset(arg));
+                }
+                (0x48, 0x8B, 0x9C, 0x04, a0, a1, a2, a3) => {
+                    let arg = four_byte_sign_extend(a3, a2, a1, a0);
+                    return Some(Instr::MovRbxRspRaxOffset(arg));
+                }
+                (0x48, 0x89, 0x9C, 0x24, a0, a1, a2, a3) => {
+                    let arg = four_byte_sign_extend(a3, a2, a1, a0);
+                    return Some(Instr::MovRspOffsetRbx(arg));
+                }
+                _ => {}
+            }
+        }
+        if bytes.len() >= 10 {
+            match (bytes[0], bytes[1], bytes[2], bytes[3], bytes[4], bytes[5], bytes[6], bytes[7], bytes[8], bytes[9]) {
+                (0x48, 0xB8, a0, a1, a2, a3, a4, a5, a6, a7) => {
+                    let arg = eight_byte(a7, a6, a5, a4, a3, a2, a1, a0);
+                    return Some(Instr::MovRax(arg));
+                }
+                _ => {}
+            }
+        }
+        None
     }
 }
 
