@@ -1,0 +1,1893 @@
+const MAX_NAME_LEN: int = 32;
+const MAX_TYPE_SIZE: int = 8;
+const MAX_STRUCT_FIELDS: int = 16;
+const MAX_FUNCTION_ARGS: int = 16;
+const MAX_STRUCTS: int = 256;
+const MAX_STATICS: int = 256;
+const MAX_CONSTS: int = 256;
+const MAX_FUNCTIONS: int = 256;
+const MAX_LOCALS: int = 256;
+
+struct Ident {
+    len: int,
+    buf: [int; MAX_NAME_LEN],
+}
+
+fn ident_eq(a: Ident, b: Ident) -> int {
+    if a.len != b.len {
+        return 0;
+    }
+    let pos: int = 0;
+    loop {
+        if pos == a.len {
+            return 1;
+        }
+        if a.buf[pos] != b.buf[pos] {
+            return 0;
+        }
+        pos = pos + 1;
+    }
+}
+
+struct Token {
+    line: int,
+    col: int,
+    type: int,
+    name: Ident,
+    value: int,
+}
+
+static CURRENT_TOKEN: Token;
+
+fn abort(error: int) -> int {
+    let code: int = CURRENT_TOKEN.line;
+    code = code * 1000;
+    code = code + CURRENT_TOKEN.col;
+    code = code * 1000;
+    code = code + error;
+    __syscall_exit(code);
+    return 0;
+}
+
+const PTR_SIZE: int = 8;
+
+const ERR_MULTIPLE_DEFS: int = 1;
+const ERR_UNEXPECTED_TOKEN: int = 2;
+const ERR_TOO_MANY: int = 3;
+const ERR_BAD_TYPE: int = 4;
+const ERR_STATIC_INITIALIZER: int = 5;
+const ERR_TYPE_TOO_LARGE: int = 6;
+const ERR_NO_SUCH_STRUCT: int = 7;
+const ERR_NO_SUCH_CONSTANT: int = 8;
+const ERR_NO_SUCH_FUNCTION: int = 9;
+const ERR_NO_SUCH_VAR: int = 10;
+const ERR_NO_FIELD: int = 11;
+const ERR_NO_INDEXING: int = 12;
+const ERR_CANT_ASSIGN: int = 13;
+const ERR_BAD_PARAM_COUNT: int = 14;
+const ERR_UNEXPECTED_CHAR: int = 15;
+const ERR_NAME_TOO_LONG: int = 16;
+const ERR_CODE_TOO_LONG: int = 17;
+const ERR_NO_MAIN: int = 18;
+const ERR_FIELD_NOT_FOUND: int = 19;
+
+const CODE_START_ADDRESS: int = 0x10000000; // at 256 MB mark
+const DATA_START_ADDRESS: int = 0x20000000; // at 512 MB mark
+const MAX_CODE_SIZE: int = 0x40000;
+
+static CODE_OUTPUT_POS: int;
+static CODE_OUTPUT: [int; MAX_CODE_SIZE];
+static TOTAL_STATIC_SIZE: int;
+
+fn current_emitter_address() -> int {
+    return CODE_OUTPUT_POS + CODE_START_ADDRESS;
+}
+
+fn emit_code_byte(byte: int) -> int {
+    if CODE_OUTPUT_POS == MAX_CODE_SIZE {
+        abort(ERR_CODE_TOO_LONG);
+    }
+    CODE_OUTPUT[CODE_OUTPUT_POS] = byte;
+    CODE_OUTPUT_POS = CODE_OUTPUT_POS + 1;
+    return 0;
+}
+
+fn emit_code_word(word: int) -> int {
+    let low: int = word % 256;
+    let high: int = word / 256;
+    emit_code_byte(low);
+    emit_code_byte(high);
+    return 0;
+}
+
+fn emit_code_dword(dword: int) -> int {
+    let low: int = dword % 65536;
+    let high: int = dword / 65536;
+    emit_code_word(low);
+    emit_code_word(high);
+    return 0;
+}
+
+fn emit_code_quad(quad: int) -> int {
+    let low: int = quad % 0x100000000;
+    let high: int = quad / 0x100000000;
+    emit_code_dword(low);
+    emit_code_dword(high);
+    return 0;
+}
+
+fn emit_code_bytes(bytes: int, amount: int) -> int {
+    if amount == 0 {
+        return 0;
+    }
+    let low: int = bytes % 256;
+    let high: int = bytes / 256;
+    amount = amount - 1;
+    emit_code_bytes(high, amount);
+    emit_code_byte(low);
+    return 0;
+}
+
+fn emit_zero_static(size: int) -> int {
+    let addr: int = TOTAL_STATIC_SIZE + DATA_START_ADDRESS;
+    TOTAL_STATIC_SIZE = TOTAL_STATIC_SIZE + size;
+    return addr;
+}
+
+fn emit_arg_pop() -> int {
+    emit_code_byte(0x5B); // pop rbx
+    emit_code_byte(0x58); // pop rax
+    return 0;
+}
+
+fn emit_add() -> int {
+    emit_arg_pop();
+    emit_code_bytes(0x4801D8, 3); // add rax, rbx
+    emit_code_byte(0x50); // push rax
+    return 0;
+}
+
+fn emit_sub() -> int {
+    emit_arg_pop();
+    emit_code_bytes(0x4829D8, 3); // sub rax, rbx
+    emit_code_byte(0x50); // push rax
+    return 0;
+}
+
+fn emit_mul() -> int {
+    emit_arg_pop();
+    emit_code_bytes(0x48F7E3, 3); // mul rbx
+    emit_code_byte(0x50); // push rax
+    return 0;
+}
+
+fn emit_div() -> int {
+    emit_arg_pop();
+    emit_code_bytes(0x4831D2, 3); // xor rdx, rdx
+    emit_code_bytes(0x48F7F3, 3); // div rbx
+    emit_code_byte(0x50); // push rax
+    return 0;
+}
+
+fn emit_mod() -> int {
+    emit_arg_pop();
+    emit_code_bytes(0x4831D2, 3); // xor rdx, rdx
+    emit_code_bytes(0x48F7F3, 3); // div rbx
+    emit_code_byte(0x52); // push rdx
+    return 0;
+}
+
+fn emit_load(size: int) -> int {
+    emit_code_byte(0x58); // pop rax
+    loop {
+        if size == 0 {
+            return 0;
+        }
+        size = size - 8;
+        emit_code_bytes(0xFFB0, 2); // push qword [rax + offset] - prefix
+        emit_code_dword(size); // push qword [rax + offset] - offset
+    }
+}
+
+fn emit_store(size: int) -> int {
+    emit_code_bytes(0x488B8424, 4); // mov rax, [rsp + offset] - prefix
+    emit_code_dword(size); // mov rax, [rsp + offset] - offset
+    let offset: int = 0;
+    loop {
+        if offset == size {
+            emit_code_byte(0x58); // pop rax
+            return 0;
+        }
+        emit_code_byte(0x5B); // pop rbx
+        emit_code_bytes(0x488998, 3); // mov [rax + offset], rbx - prefix
+        emit_code_dword(offset); // mov [rax + offset], rbx - offset
+        offset = offset + 8;
+    }
+}
+
+fn emit_call(addr: int) -> int {
+    let next_op: int = current_emitter_address() + 5;
+    addr = addr - next_op;
+    let fix_position: int = CODE_OUTPUT_POS + 1;
+    emit_code_byte(0xE8); // call offset - prefix
+    emit_code_dword(addr); // call offset - offset
+    return fix_position;
+}
+
+fn emit_eq() -> int {
+    emit_arg_pop();
+    emit_code_bytes(0x4831D2, 3); // xor rdx, rdx
+    emit_code_bytes(0x4839D8, 3); // cmp rax, rbx
+    emit_code_bytes(0x0F94C2, 3); // sete dl
+    emit_code_byte(0x52); // push rdx
+    return 0;
+}
+
+fn emit_neq() -> int {
+    emit_arg_pop();
+    emit_code_bytes(0x4831D2, 3); // xor rdx, rdx
+    emit_code_bytes(0x4839D8, 3); // cmp rax, rbx
+    emit_code_bytes(0x0F95C2, 3); // setne dl
+    emit_code_byte(0x52); // push rdx
+    return 0;
+}
+
+fn emit_less() -> int {
+    emit_arg_pop();
+    emit_code_bytes(0x4831D2, 3); // xor rdx, rdx
+    emit_code_bytes(0x4839D8, 3); // cmp rax, rbx
+    emit_code_bytes(0x0F92C2, 3); // setb dl
+    emit_code_byte(0x52); // push rdx
+    return 0;
+}
+
+fn emit_push(value: int) -> int {
+    emit_code_bytes(0x48B8, 2); // mov rax, imm - prefix
+    emit_code_quad(value); // mov rax, imm - value
+    emit_code_byte(0x50); // push rax
+    return 0;
+}
+
+fn emit_pop(size: int) -> int {
+    emit_code_bytes(0x4881C4, 3); // add rsp, imm - prefix
+    emit_code_dword(size); // add rsp, imm - value
+    return 0;
+}
+
+fn emit_jmp(addr: int) -> int {
+    let next_op: int = current_emitter_address() + 5;
+    addr = addr - next_op;
+    let fix_position: int = CODE_OUTPUT_POS + 1;
+    emit_code_byte(0xE9); // jmp offset - prefix
+    emit_code_dword(addr); // jmp offset - offset
+    return fix_position;
+}
+
+fn emit_jf(addr: int) -> int {
+    emit_code_byte(0x58); // pop rax
+    emit_code_bytes(0x4885C0, 3); // test rax, rax
+    let next_op: int = current_emitter_address() + 6;
+    addr = addr - next_op;
+    let fix_position: int = CODE_OUTPUT_POS + 2;
+    emit_code_bytes(0x0F84, 2); // jz offset - prefix
+    emit_code_dword(addr); // jz offset - offset
+    return fix_position;
+}
+
+fn emit_ret() -> int {
+    emit_code_byte(0x5D); // pop rbp
+    emit_code_byte(0xC3); // ret
+    return 0;
+}
+
+fn emit_get_param_address(offset: int) -> int {
+    offset = offset + 16;
+    emit_code_bytes(0x488D85, 3); // lea rax, [rbp + offset] - prefix
+    emit_code_dword(offset); // lea rax, [rbp + offset] - offset
+    emit_code_byte(0x50); // push rax
+    return 0;
+}
+
+fn emit_get_local_address(offset: int) -> int {
+    offset = 0 - offset;
+    emit_code_bytes(0x488D85, 3); // lea rax, [rbp + offset] - prefix
+    emit_code_dword(offset); // lea rax, [rbp + offset] - offset
+    emit_code_byte(0x50); // push rax
+    return 0;
+}
+
+fn emit_field_load(size: int, whole_size: int) -> int {
+    emit_code_byte(0x58); // pop rax
+    let offset: int = 0;
+    loop {
+        if offset == size {
+            let to_add: int = whole_size - size;
+            emit_code_bytes(0x4881C4, 3); // add rsp, imm - prefix
+            emit_code_dword(to_add); // add rsp, imm - value
+            return 0;
+        }
+        offset = offset + 8;
+        let off1: int = size - offset;
+        emit_code_bytes(0x488B9C04, 4); // mov rbx, [rsp + rax + offset] - prefix
+        emit_code_dword(off1); // mov rbx, [rsp + rax + offset] - offset
+        let off2: int = whole_size - offset;
+        emit_code_bytes(0x48899C24, 4); // mov [rsp + offset], rbx - prefix
+        emit_code_dword(off2); // mov [rsp + offset], rbx - offset
+    }
+}
+
+fn emit_jump_fix(addr: int, new_target: int) -> int {
+    let op_start: int = addr + 4;
+    op_start = op_start + CODE_START_ADDRESS;
+    new_target = new_target - op_start;
+    let old_write_ptr: int = CODE_OUTPUT_POS;
+    CODE_OUTPUT_POS = addr;
+    emit_code_dword(new_target);
+    CODE_OUTPUT_POS = old_write_ptr;
+    return 0;
+}
+
+fn emit_stack_reserve(size: int) -> int {
+    emit_code_bytes(0x4881EC, 3); // sub rsp, imm - prefix
+    emit_code_dword(size); // sub rsp, imm - value
+    return 0;
+}
+
+fn emit_function_prologue() -> int {
+    emit_code_byte(0x55); // push rbp
+    emit_code_bytes(0x4889E5, 3); // mov rbp, rsp
+    return 0;
+}
+
+fn emit_dup() -> int {
+    emit_code_bytes(0x488B0424, 4); // mov rax, [rsp]
+    emit_code_byte(0x50); // push rax
+    return 0;
+}
+
+fn emit_quad_word(value: int) -> int {
+    let bytes: int = 8;
+    loop {
+        if bytes == 0 {
+            return 0;
+        }
+        let low: int = value % 256;
+        __syscall_write(low);
+        value = value / 256;
+        bytes = bytes - 1;
+    }
+}
+
+fn emit_zeros(amount: int) -> int {
+    loop {
+        if amount == 0 {
+            return 0;
+        }
+        __syscall_write(0);
+        amount = amount - 1;
+    }
+}
+
+fn emit_flush_code() -> int {
+    // emit magic string - "sparkexe"
+    emit_quad_word(0x6578656B72617073);
+    // emit section lengths
+    emit_quad_word(CODE_OUTPUT_POS);
+    emit_quad_word(TOTAL_STATIC_SIZE);
+    let i: int = 0;
+    loop {
+        if i == CODE_OUTPUT_POS {
+            emit_zeros(TOTAL_STATIC_SIZE);
+            return 0;
+        }
+        __syscall_write(CODE_OUTPUT[i]);
+        i = i + 1;
+    }
+}
+
+static CURRENT_LINE: int;
+static CURRENT_COLUMN: int;
+
+static LEXER_CURRENT_CHAR: int;
+
+fn peek_char() -> int {
+    return LEXER_CURRENT_CHAR;
+}
+
+fn advance_char() -> int {
+    CURRENT_COLUMN = CURRENT_COLUMN + 1;
+    if LEXER_CURRENT_CHAR == 10 {
+        CURRENT_LINE = CURRENT_LINE + 1;
+        CURRENT_COLUMN = 1;
+    }
+    LEXER_CURRENT_CHAR = __syscall_read();
+    return 0;
+}
+
+const TOK_EOF: int = 0;
+const TOK_INT: int = 1;
+const TOK_FN: int = 2;
+const TOK_STRUCT: int = 3;
+const TOK_LEFT_BRACKET: int = 4;
+const TOK_RIGHT_BRACKET: int = 5;
+const TOK_LEFT_BRACE: int = 6;
+const TOK_RIGHT_BRACE: int = 7;
+const TOK_LEFT_PAREN: int = 8;
+const TOK_RIGHT_PAREN: int = 9;
+const TOK_COMMA: int = 10;
+const TOK_DOT: int = 11;
+const TOK_SEMICOLON: int = 12;
+const TOK_COLON: int = 13;
+const TOK_PLUS: int = 14;
+const TOK_MINUS: int = 15;
+const TOK_EQ: int = 16;
+const TOK_EQEQ: int = 17;
+const TOK_NOTEQ: int = 18;
+const TOK_STAR: int = 19;
+const TOK_IDENT: int = 20;
+const TOK_LOOP: int = 21;
+const TOK_NUMBER: int = 22;
+const TOK_CONST: int = 23;
+const TOK_STATIC: int = 24;
+const TOK_RETURN: int = 25;
+const TOK_ARROW: int = 26;
+const TOK_LESS: int = 27;
+const TOK_SLASH: int = 28;
+const TOK_PERCENT: int = 29;
+const TOK_LET: int = 30;
+const TOK_IF: int = 31;
+
+fn skip_line() -> int {
+    loop {
+        if peek_char() == 10 {
+            return 0;
+        }
+        advance_char();
+    }
+}
+
+fn make_simple_token(type: int) -> int {
+    advance_char();
+    CURRENT_TOKEN.type = type;
+    return 0;
+}
+
+fn recognise_keyword() -> int {
+    if CURRENT_TOKEN.name.len == 3 {
+        if CURRENT_TOKEN.name.buf[0] == 105 {
+            if CURRENT_TOKEN.name.buf[1] == 110 {
+                if CURRENT_TOKEN.name.buf[2] == 116 {
+                    CURRENT_TOKEN.type = TOK_INT;
+                    return 0;
+                }
+            }
+        }
+    }
+    if CURRENT_TOKEN.name.len == 2 {
+        if CURRENT_TOKEN.name.buf[0] == 102 {
+            if CURRENT_TOKEN.name.buf[1] == 110 {
+                CURRENT_TOKEN.type = TOK_FN;
+                return 0;
+            }
+        }
+    }
+    if CURRENT_TOKEN.name.len == 6 {
+        if CURRENT_TOKEN.name.buf[0] == 115 {
+            if CURRENT_TOKEN.name.buf[1] == 116 {
+                if CURRENT_TOKEN.name.buf[2] == 114 {
+                    if CURRENT_TOKEN.name.buf[3] == 117 {
+                        if CURRENT_TOKEN.name.buf[4] == 99 {
+                            if CURRENT_TOKEN.name.buf[5] == 116 {
+                                CURRENT_TOKEN.type = TOK_STRUCT;
+                                return 0;
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+    if CURRENT_TOKEN.name.len == 4 {
+        if CURRENT_TOKEN.name.buf[0] == 108 {
+            if CURRENT_TOKEN.name.buf[1] == 111 {
+                if CURRENT_TOKEN.name.buf[2] == 111 {
+                    if CURRENT_TOKEN.name.buf[3] == 112 {
+                        CURRENT_TOKEN.type = TOK_LOOP;
+                        return 0;
+                    }
+                }
+            }
+        }
+    }
+    if CURRENT_TOKEN.name.len == 5 {
+        if CURRENT_TOKEN.name.buf[0] == 99 {
+            if CURRENT_TOKEN.name.buf[1] == 111 {
+                if CURRENT_TOKEN.name.buf[2] == 110 {
+                    if CURRENT_TOKEN.name.buf[3] == 115 {
+                        if CURRENT_TOKEN.name.buf[4] == 116 {
+                            CURRENT_TOKEN.type = TOK_CONST;
+                            return 0;
+                        }
+                    }
+                }
+            }
+        }
+    }
+    if CURRENT_TOKEN.name.len == 6 {
+        if CURRENT_TOKEN.name.buf[0] == 115 {
+            if CURRENT_TOKEN.name.buf[1] == 116 {
+                if CURRENT_TOKEN.name.buf[2] == 97 {
+                    if CURRENT_TOKEN.name.buf[3] == 116 {
+                        if CURRENT_TOKEN.name.buf[4] == 105 {
+                            if CURRENT_TOKEN.name.buf[5] == 99 {
+                                CURRENT_TOKEN.type = TOK_STATIC;
+                                return 0;
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+    if CURRENT_TOKEN.name.len == 6 {
+        if CURRENT_TOKEN.name.buf[0] == 114 {
+            if CURRENT_TOKEN.name.buf[1] == 101 {
+                if CURRENT_TOKEN.name.buf[2] == 116 {
+                    if CURRENT_TOKEN.name.buf[3] == 117 {
+                        if CURRENT_TOKEN.name.buf[4] == 114 {
+                            if CURRENT_TOKEN.name.buf[5] == 110 {
+                                CURRENT_TOKEN.type = TOK_RETURN;
+                                return 0;
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+    if CURRENT_TOKEN.name.len == 3 {
+        if CURRENT_TOKEN.name.buf[0] == 108 {
+            if CURRENT_TOKEN.name.buf[1] == 101 {
+                if CURRENT_TOKEN.name.buf[2] == 116 {
+                    CURRENT_TOKEN.type = TOK_LET;
+                    return 0;
+                }
+            }
+        }
+    }
+    if CURRENT_TOKEN.name.len == 2 {
+        if CURRENT_TOKEN.name.buf[0] == 105 {
+            if CURRENT_TOKEN.name.buf[1] == 102 {
+                CURRENT_TOKEN.type = TOK_IF;
+                return 0;
+            }
+        }
+    }
+    return 0;
+}
+
+fn is_char_alphanumeric(ch: int) -> int {
+    if ch == 95 { // '_'
+        return 1;
+    }
+    if ch < 48 { // ch < '0'
+        return 0;
+    }
+    if ch < 58 { // ch <= '9'
+        return 1;
+    }
+    if ch < 65 { // ch < 'A'
+        return 0;
+    }
+    if ch < 91 { // ch <= 'Z'
+        return 1;
+    }
+    if ch < 97 { // ch < 'a'
+        return 0;
+    }
+    if ch < 123 { // ch <= 'z'
+        return 1;
+    }
+    return 0;
+}
+
+fn is_char_numeric(ch: int) -> int {
+    if ch < 48 { // ch < '0'
+        return 0;
+    }
+    if ch < 58 { // ch <= '9'
+        return 1;
+    }
+    return 0;
+}
+
+fn lex_identifier() -> int {
+    let len: int = 0;
+    CURRENT_TOKEN.type = TOK_IDENT;
+    loop {
+        let ch: int = peek_char();
+        if is_char_alphanumeric(ch) == 0 {
+            CURRENT_TOKEN.name.len = len;
+            recognise_keyword();
+            return 0;
+        }
+        if len == MAX_NAME_LEN {
+            abort(ERR_NAME_TOO_LONG);
+        }
+        CURRENT_TOKEN.name.buf[len] = ch;
+        len = len + 1;
+        advance_char();
+    }
+}
+
+fn convert_hex_digit(ch: int) -> int {
+    if ch < 48 {
+        return 16;
+    }
+    if ch < 58 {
+        return ch - 48;
+    }
+    if ch < 65 {
+        return 16;
+    }
+    if ch < 71 {
+        return ch - 55;
+    }
+    if ch < 97 {
+        return 16;
+    }
+    if ch < 103 {
+        return ch - 87;
+    }
+    return 16;
+}
+
+fn lex_hex_number() -> int {
+    let value: int = 0;
+    loop {
+        let ch: int = peek_char();
+        let conv: int = convert_hex_digit(ch);
+        if conv == 16 {
+            if is_char_alphanumeric(ch) {
+                abort(ERR_UNEXPECTED_CHAR);
+            }
+            CURRENT_TOKEN.value = value;
+            return 0;
+        }
+        value = value * 16;
+        value = value + conv;
+        advance_char();
+    }
+}
+
+fn lex_number() -> int {
+    let value: int = 0;
+    CURRENT_TOKEN.type = TOK_NUMBER;
+    if peek_char() == 48 { // '0'
+        advance_char();
+        if peek_char() == 120 { // 'x'
+            advance_char();
+            let next: int = peek_char();
+            if convert_hex_digit(next) == 16 {
+                abort(ERR_UNEXPECTED_CHAR);
+            }
+            lex_hex_number();
+            return 0;
+        }
+    }
+    loop {
+        let ch: int = peek_char();
+        if is_char_numeric(ch) == 0 {
+            if is_char_alphanumeric(ch) {
+                abort(ERR_UNEXPECTED_CHAR);
+            }
+            CURRENT_TOKEN.value = value;
+            return 0;
+        }
+        let digit: int = ch - 48; // ch - '0'
+        value = value * 10;
+        value = value + digit;
+        advance_char();
+    }
+}
+
+fn advance_token_raw() -> int {
+    let ch: int = peek_char();
+    if ch == 32 { // ' '
+        advance_char();
+        return advance_token_raw();
+    }
+    if ch == 13 { // '\r'
+        advance_char();
+        return advance_token_raw();
+    }
+    if ch == 9 { // '\t'
+        advance_char();
+        return advance_token_raw();
+    }
+    if ch == 10 { // '\n'
+        advance_char();
+        return advance_token_raw();
+    }
+    CURRENT_TOKEN.line = CURRENT_LINE;
+    CURRENT_TOKEN.col = CURRENT_COLUMN;
+    if ch == 47 { // '/'
+        advance_char();
+        if peek_char() == 47 { // '/'
+            skip_line();
+            return advance_token_raw();
+        }
+        CURRENT_TOKEN.type = TOK_SLASH;
+        return 0;
+    }
+    if ch == 43 { // '+'
+        return make_simple_token(TOK_PLUS);
+    }
+    if ch == 45 { // '-'
+        advance_char();
+        if peek_char() == 62 { // '>'
+            return make_simple_token(TOK_ARROW);
+        }
+        CURRENT_TOKEN.type = TOK_MINUS;
+        return 0;
+    }
+    if ch == 33 { // '!'
+        advance_char();
+        if peek_char() != 61 { // '='
+            abort(ERR_UNEXPECTED_CHAR);
+        }
+        return make_simple_token(TOK_NOTEQ);
+    }
+    if ch == 61 { // '='
+        advance_char();
+        if peek_char() == 61 { // '='
+            return make_simple_token(TOK_EQEQ);
+        }
+        CURRENT_TOKEN.type = TOK_EQ;
+        return 0;
+    }
+    if ch == 37 { // '%'
+        return make_simple_token(TOK_PERCENT);
+    }
+    if ch == 60 { // '<'
+        return make_simple_token(TOK_LESS);
+    }
+    if ch == 40 { // '('
+        return make_simple_token(TOK_LEFT_PAREN);
+    }
+    if ch == 41 { // ')'
+        return make_simple_token(TOK_RIGHT_PAREN);
+    }
+    if ch == 123 { // '{'
+        return make_simple_token(TOK_LEFT_BRACE);
+    }
+    if ch == 125 { // '}'
+        return make_simple_token(TOK_RIGHT_BRACE);
+    }
+    if ch == 91 { // '['
+        return make_simple_token(TOK_LEFT_BRACKET);
+    }
+    if ch == 93 { // ']'
+        return make_simple_token(TOK_RIGHT_BRACKET);
+    }
+    if ch == 256 { // eof marker
+        CURRENT_TOKEN.type = TOK_EOF;
+        return 0;
+    }
+    if ch == 44 { // ','
+        return make_simple_token(TOK_COMMA);
+    }
+    if ch == 46 { // '.'
+        return make_simple_token(TOK_DOT);
+    }
+    if ch == 59 { // ';'
+        return make_simple_token(TOK_SEMICOLON);
+    }
+    if ch == 58 { // ':'
+        return make_simple_token(TOK_COLON);
+    }
+    if ch == 42 { // '*'
+        return make_simple_token(TOK_STAR);
+    }
+    if is_char_numeric(ch) {
+        lex_number();
+        return 0;
+    }
+    if is_char_alphanumeric(ch) {
+        lex_identifier();
+        return 0;
+    }
+    abort(ERR_UNEXPECTED_CHAR);
+    return 0;
+}
+
+fn advance_token() -> int {
+    advance_token_raw();
+    return 0;
+}
+
+fn expect_token(kind: int) -> int {
+    if CURRENT_TOKEN.type != kind {
+        abort(ERR_UNEXPECTED_TOKEN);
+    }
+    advance_token();
+    return 0;
+}
+
+const TY_INT: int = 1;
+const TY_ARRAY: int = 2;
+
+struct Type {
+    buf: [int; MAX_TYPE_SIZE],
+}
+
+fn make_int_ty() -> Type {
+    let type: Type;
+    type.buf[0] = TY_INT;
+    let index: int = MAX_TYPE_SIZE - 1;
+    loop {
+        if index == 0 {
+            return type;
+        }
+        type.buf[index] = 0;
+        index = index - 1;
+    }
+}
+
+fn make_array_ty(from: Type, len: int) -> Type {
+    let index: int = MAX_TYPE_SIZE - 2;
+    if from.buf[index] != 0 {
+        abort(ERR_TYPE_TOO_LARGE);
+    }
+    let type: Type;
+    type.buf[0] = TY_ARRAY;
+    type.buf[1] = len;
+    let from_i: int = 0;
+    let to_i: int = 2;
+    loop {
+        if to_i == MAX_TYPE_SIZE {
+            return type;
+        }
+        type.buf[to_i] = from.buf[from_i];
+        to_i = to_i + 1;
+        from_i = from_i + 1;
+    }
+}
+
+fn make_struct_ty(id: int) -> Type {
+    let type: Type;
+    type.buf[0] = 3 + id;
+    let index: int = MAX_TYPE_SIZE - 1;
+    loop {
+        if index == 0 {
+            return type;
+        }
+        type.buf[index] = 0;
+        index = index - 1;
+    }
+}
+
+fn type_eq(a: Type, b: Type) -> int {
+    let pos: int = 0;
+    loop {
+        if pos == MAX_TYPE_SIZE {
+            return 1;
+        }
+        if a.buf[pos] != b.buf[pos] {
+            return 0;
+        }
+        pos = pos + 1;
+    }
+}
+
+fn assert_type(expected: Type, got: Type) -> int {
+    if type_eq(expected, got) {
+        return 0;
+    }
+    abort(ERR_BAD_TYPE);
+    return 0;
+}
+
+struct Field {
+    name: Ident,
+    offset: int,
+    type: Type,
+}
+
+struct Struct {
+    name: Ident,
+    field_count: int,
+    fields: [Field; MAX_STRUCT_FIELDS],
+    size: int,
+}
+
+static STRUCT_COUNT: int;
+static STRUCTS: [Struct; MAX_STRUCTS];
+
+fn type_size(type: Type) -> int {
+    let mul: int = 1;
+    let pos: int = 0;
+    loop {
+        if type.buf[pos] == TY_INT {
+            return PTR_SIZE * mul;
+        }
+        if type.buf[pos] == TY_ARRAY {
+            let index: int = pos + 1;
+            mul = mul * type.buf[index];
+        }
+        // is it struct?
+        if type.buf[pos] != TY_ARRAY {
+            let index: int = type.buf[pos] - 3;
+            return STRUCTS[index].size * mul;
+        }
+        pos = pos + 2;
+    }
+}
+
+fn find_struct_opt(name: Ident) -> int {
+    let pos: int = 0;
+    loop {
+        if pos == STRUCT_COUNT {
+            return MAX_STRUCTS;
+        }
+        if ident_eq(STRUCTS[pos].name, name) {
+            return pos;
+        }
+        pos = pos + 1;
+    }
+}
+
+fn find_struct(name: Ident) -> int {
+    let pos: int = find_struct_opt(name);
+    if pos == MAX_STRUCTS {
+        abort(ERR_NO_SUCH_STRUCT);
+    }
+    return pos;
+}
+
+struct Static {
+    name: Ident,
+    addr: int,
+    type: Type,
+}
+
+static STATIC_COUNT: int;
+static STATICS: [Static; MAX_STATICS];
+
+struct Const {
+    name: Ident,
+    value: int,
+}
+
+static CONST_COUNT: int;
+static CONSTS: [Const; MAX_CONSTS];
+
+fn eval_const(name: Ident) -> int {
+    let pos: int = 0;
+    loop {
+        if pos == CONST_COUNT {
+            abort(ERR_NO_SUCH_CONSTANT);
+        }
+        if ident_eq(CONSTS[pos].name, name) {
+            return CONSTS[pos].value;
+        }
+        pos = pos + 1;
+    }
+}
+
+struct Function {
+    name: Ident,
+    args: int,
+    arg_names: [Ident; MAX_FUNCTION_ARGS],
+    arg_types: [Type; MAX_FUNCTION_ARGS],
+    arg_size: int,
+    return_type: Type,
+    addr: int,
+}
+
+static FUNCTION_COUNT: int;
+static FUNCTIONS: [Function; MAX_FUNCTIONS];
+
+fn find_function_opt(name: Ident) -> int {
+    let pos: int = 0;
+    loop {
+        if pos == FUNCTION_COUNT {
+            return MAX_FUNCTIONS;
+        }
+        if ident_eq(FUNCTIONS[pos].name, name) {
+            return pos;
+        }
+        pos = pos + 1;
+    }
+}
+
+fn find_function(name: Ident) -> int {
+    let pos: int = find_function_opt(name);
+    if pos == MAX_FUNCTIONS {
+        abort(ERR_NO_SUCH_FUNCTION);
+    }
+    return pos;
+}
+
+struct Local {
+    name: Ident,
+    offset: int,
+    type: Type,
+    is_param: int,
+}
+
+static LOCAL_COUNT: int;
+static LOCALS: [Local; MAX_LOCALS];
+static TOTAL_LOCAL_SIZE: int;
+static TOTAL_PARAM_SIZE: int;
+
+const EXPR_RVALUE: int = 1;
+const EXPR_LVALUE: int = 2;
+const EXPR_INVALID: int = 3;
+
+struct Expr {
+    type: Type,
+    kind: int,
+}
+
+fn parse_const_value() -> int {
+    if CURRENT_TOKEN.type == TOK_NUMBER {
+        let value: int = CURRENT_TOKEN.value;
+        advance_token();
+        return value;
+    }
+    if CURRENT_TOKEN.type == TOK_IDENT {
+        let value: int = eval_const(CURRENT_TOKEN.name);
+        advance_token();
+        return value;
+    }
+    abort(ERR_UNEXPECTED_TOKEN);
+    return 0;
+}
+
+fn peek_name() -> Ident {
+    if CURRENT_TOKEN.type != TOK_IDENT {
+        abort(ERR_UNEXPECTED_TOKEN);
+    }
+    return CURRENT_TOKEN.name;
+}
+
+fn parse_name() -> Ident {
+    let name: Ident = peek_name();
+    advance_token();
+    return name;
+}
+
+fn parse_type() -> Type {
+    if CURRENT_TOKEN.type == TOK_INT {
+        advance_token();
+        return make_int_ty();
+    }
+    if CURRENT_TOKEN.type == TOK_IDENT {
+        let index: int = find_struct(CURRENT_TOKEN.name);
+        advance_token();
+        return make_struct_ty(index);
+    }
+    if CURRENT_TOKEN.type == TOK_LEFT_BRACKET {
+        advance_token();
+        let inner: Type = parse_type();
+        expect_token(TOK_SEMICOLON);
+        let len: int = parse_const_value();
+        expect_token(TOK_RIGHT_BRACKET);
+        return make_array_ty(inner, len);
+    }
+    abort(ERR_UNEXPECTED_TOKEN);
+    return make_int_ty();
+}
+
+fn process_const(ident: Ident) -> Expr {
+    let index: int = 0;
+    let expr: Expr;
+    expr.type = make_int_ty();
+    expr.kind = EXPR_RVALUE;
+    loop {
+        if index == CONST_COUNT {
+            expr.kind = EXPR_INVALID;
+            return expr;
+        }
+        if ident_eq(CONSTS[index].name, ident) {
+            emit_push(CONSTS[index].value);
+            return expr;
+        }
+        index = index + 1;
+    }
+}
+
+fn process_static(ident: Ident) -> Expr {
+    let index: int = 0;
+    let expr: Expr;
+    expr.type = make_int_ty();
+    expr.kind = EXPR_LVALUE;
+    loop {
+        if index == STATIC_COUNT {
+            expr.kind = EXPR_INVALID;
+            return expr;
+        }
+        if ident_eq(STATICS[index].name, ident) {
+            emit_push(STATICS[index].addr);
+            expr.type = STATICS[index].type;
+            return expr;
+        }
+        index = index + 1;
+    }
+}
+
+fn process_local(ident: Ident) -> Expr {
+    let index: int = LOCAL_COUNT;
+    let expr: Expr;
+    expr.type = make_int_ty();
+    expr.kind = EXPR_LVALUE;
+    loop {
+        if index == 0 {
+            expr.kind = EXPR_INVALID;
+            return expr;
+        }
+        index = index - 1;
+        if ident_eq(LOCALS[index].name, ident) {
+            expr.type = LOCALS[index].type;
+            if LOCALS[index].is_param {
+                emit_get_param_address(LOCALS[index].offset);
+                return expr;
+            }
+            emit_get_local_address(LOCALS[index].offset);
+            return expr;
+        }
+    }
+}
+
+fn process_ident(ident: Ident) -> Expr {
+    let expr: Expr = process_local(ident);
+    if expr.kind != EXPR_INVALID {
+        return expr;
+    }
+    expr = process_const(ident);
+    if expr.kind != EXPR_INVALID {
+        return expr;
+    }
+    expr = process_static(ident);
+    if expr.kind != EXPR_INVALID {
+        return expr;
+    }
+    abort(ERR_NO_SUCH_VAR);
+    let expr: Expr;
+    expr.type = make_int_ty();
+    expr.kind = EXPR_INVALID;
+    return expr;
+}
+
+fn make_rvalue(expr: Expr, expected_type: Type) -> int {
+    assert_type(expected_type, expr.type);
+    if expr.kind == EXPR_LVALUE {
+        emit_load(type_size(expr.type));
+    }
+    return 0;
+}
+
+fn parse_index() -> int {
+    if CURRENT_TOKEN.type == TOK_NUMBER {
+        emit_push(CURRENT_TOKEN.value);
+        advance_token();
+        return 0;
+    }
+    if CURRENT_TOKEN.type == TOK_IDENT {
+        let expr: Expr = process_ident(CURRENT_TOKEN.name);
+        make_rvalue(expr, make_int_ty());
+        advance_token();
+        return 0;
+    }
+    abort(ERR_UNEXPECTED_TOKEN);
+    return 0;
+}
+
+fn find_field(type: Type, field: Ident) -> Field {
+    if type.buf[0] == 1 {
+        abort(ERR_NO_FIELD);
+    }
+    if type.buf[0] == 2 {
+        abort(ERR_NO_FIELD);
+    }
+    let index: int = type.buf[0] - 3;
+    let search: int = 0;
+    loop {
+        if search == STRUCTS[index].field_count {
+            abort(ERR_FIELD_NOT_FOUND);
+        }
+        if ident_eq(field, STRUCTS[index].fields[search].name) {
+            return STRUCTS[index].fields[search];
+        }
+        search = search + 1;
+    }
+}
+
+fn array_elem_type(array: Type) -> Type {
+    if array.buf[0] != TY_ARRAY {
+        abort(ERR_NO_INDEXING);
+    }
+    let type: Type;
+    let index: int = MAX_TYPE_SIZE - 1;
+    type.buf[index] = 0;
+    index = index - 1;
+    type.buf[index] = 0;
+    let from_i: int = 2;
+    let to_i: int = 0;
+    loop {
+        if from_i == MAX_TYPE_SIZE {
+            return type;
+        }
+        type.buf[to_i] = array.buf[from_i];
+        to_i = to_i + 1;
+        from_i = from_i + 1;
+    }
+}
+
+fn parse_term_suffix(base: Expr) -> Expr {
+    let whole_size: int = type_size(base.type);
+    if CURRENT_TOKEN.type == TOK_DOT {
+        advance_token();
+        let field: Field = find_field(base.type, parse_name());
+        base.type = field.type;
+        if base.kind == EXPR_LVALUE {
+            emit_push(field.offset);
+            emit_add();
+            return parse_term_suffix(base);
+        }
+        emit_push(field.offset);
+        emit_field_load(type_size(field.type), whole_size);
+        return parse_term_suffix(base);
+    }
+    if CURRENT_TOKEN.type == TOK_LEFT_BRACKET {
+        advance_token();
+        parse_index();
+        let elem_type: Type = array_elem_type(base.type);
+        let elem_size: int = type_size(elem_type);
+        emit_push(elem_size);
+        emit_mul();
+        base.type = elem_type;
+        expect_token(TOK_RIGHT_BRACKET);
+        if base.kind == EXPR_LVALUE {
+            emit_add();
+            return parse_term_suffix(base);
+        }
+        emit_field_load(elem_size, whole_size);
+        return parse_term_suffix(base);
+    }
+    return base;
+}
+
+fn finish_function_call(index: int, params: int) -> Expr {
+    if params != FUNCTIONS[index].args {
+        abort(ERR_BAD_PARAM_COUNT);
+    }
+    advance_token();
+    emit_call(FUNCTIONS[index].addr);
+    emit_pop(FUNCTIONS[index].arg_size);
+    let expr: Expr;
+    expr.type = FUNCTIONS[index].return_type;
+    expr.kind = EXPR_RVALUE;
+    return expr;
+}
+
+fn parse_term() -> Expr {
+    if CURRENT_TOKEN.type == TOK_NUMBER {
+        emit_push(CURRENT_TOKEN.value);
+        advance_token();
+        let expr: Expr;
+        expr.type = make_int_ty();
+        expr.kind = EXPR_RVALUE;
+        return expr;
+    }
+    let name: Ident = parse_name();
+    if CURRENT_TOKEN.type == TOK_LEFT_PAREN {
+        let index: int = find_function(name);
+        advance_token();
+        let return_type: Type = FUNCTIONS[index].return_type;
+        let return_size: int = type_size(return_type);
+        emit_stack_reserve(return_size);
+        let params: int = 0;
+        loop {
+            if CURRENT_TOKEN.type == TOK_RIGHT_PAREN {
+                return finish_function_call(index, params);
+            }
+            let param: Expr = parse_term();
+            make_rvalue(param, FUNCTIONS[index].arg_types[params]);
+            params = params + 1;
+            if CURRENT_TOKEN.type == TOK_RIGHT_PAREN {
+                return finish_function_call(index, params);
+            }
+            expect_token(TOK_COMMA);
+        }
+    }
+    let expr: Expr = process_ident(name);
+    return parse_term_suffix(expr);
+}
+
+fn parse_expr() -> Expr {
+    let term: Expr = parse_term();
+    let arithmetic_result: Expr;
+    arithmetic_result.type = make_int_ty();
+    arithmetic_result.kind = EXPR_RVALUE;
+    if CURRENT_TOKEN.type == TOK_PLUS {
+        make_rvalue(term, make_int_ty());
+        advance_token();
+        let term2: Expr = parse_term();
+        make_rvalue(term2, make_int_ty());
+        emit_add();
+        return arithmetic_result;
+    }
+    if CURRENT_TOKEN.type == TOK_MINUS {
+        make_rvalue(term, make_int_ty());
+        advance_token();
+        let term2: Expr = parse_term();
+        make_rvalue(term2, make_int_ty());
+        emit_sub();
+        return arithmetic_result;
+    }
+    if CURRENT_TOKEN.type == TOK_STAR {
+        make_rvalue(term, make_int_ty());
+        advance_token();
+        let term2: Expr = parse_term();
+        make_rvalue(term2, make_int_ty());
+        emit_mul();
+        return arithmetic_result;
+    }
+    if CURRENT_TOKEN.type == TOK_PERCENT {
+        make_rvalue(term, make_int_ty());
+        advance_token();
+        let term2: Expr = parse_term();
+        make_rvalue(term2, make_int_ty());
+        emit_mod();
+        return arithmetic_result;
+    }
+    if CURRENT_TOKEN.type == TOK_SLASH {
+        make_rvalue(term, make_int_ty());
+        advance_token();
+        let term2: Expr = parse_term();
+        make_rvalue(term2, make_int_ty());
+        emit_div();
+        return arithmetic_result;
+    }
+    if CURRENT_TOKEN.type == TOK_EQEQ {
+        make_rvalue(term, make_int_ty());
+        advance_token();
+        let term2: Expr = parse_term();
+        make_rvalue(term2, make_int_ty());
+        emit_eq();
+        return arithmetic_result;
+    }
+    if CURRENT_TOKEN.type == TOK_NOTEQ {
+        make_rvalue(term, make_int_ty());
+        advance_token();
+        let term2: Expr = parse_term();
+        make_rvalue(term2, make_int_ty());
+        emit_neq();
+        return arithmetic_result;
+    }
+    if CURRENT_TOKEN.type == TOK_LESS {
+        make_rvalue(term, make_int_ty());
+        advance_token();
+        let term2: Expr = parse_term();
+        make_rvalue(term2, make_int_ty());
+        emit_less();
+        return arithmetic_result;
+    }
+    if CURRENT_TOKEN.type == TOK_EQ {
+        if term.kind != EXPR_LVALUE {
+            abort(ERR_CANT_ASSIGN);
+        }
+        // duplicate location pointer on stack
+        emit_dup();
+        advance_token();
+        let rhs: Expr = parse_expr();
+        if rhs.kind == EXPR_LVALUE {
+            make_rvalue(rhs, rhs.type);
+            rhs.kind = EXPR_RVALUE;
+        }
+        let size: int = type_size(rhs.type);
+        // store consumes one location pointer, and value
+        emit_store(size);
+        // use the second location pointer to get the value back
+        emit_load(size);
+        return rhs;
+    }
+    return term;
+}
+
+fn assert_block_start() -> int {
+    if CURRENT_TOKEN.type != TOK_LEFT_BRACE {
+        abort(ERR_UNEXPECTED_TOKEN);
+    }
+    return 0;
+}
+
+fn parse_statement() -> int {
+    if CURRENT_TOKEN.type == TOK_LEFT_BRACE {
+        advance_token();
+        let locals_before: int = LOCAL_COUNT;
+        let local_size_before: int = TOTAL_LOCAL_SIZE;
+        loop {
+            if CURRENT_TOKEN.type == TOK_RIGHT_BRACE {
+                advance_token();
+                let extra_locals: int = TOTAL_LOCAL_SIZE - local_size_before;
+                emit_pop(extra_locals);
+                LOCAL_COUNT = locals_before;
+                TOTAL_LOCAL_SIZE = local_size_before;
+                return 0;
+            }
+            parse_statement();
+        }
+    }
+    if CURRENT_TOKEN.type == TOK_LET {
+        if LOCAL_COUNT == MAX_LOCALS {
+            abort(ERR_TOO_MANY);
+        }
+        advance_token();
+        let name: Ident = parse_name();
+        expect_token(TOK_COLON);
+        let type: Type = parse_type();
+        let size: int = type_size(type);
+        emit_stack_reserve(size);
+        TOTAL_LOCAL_SIZE = TOTAL_LOCAL_SIZE + size;
+        if CURRENT_TOKEN.type == TOK_EQ {
+            advance_token();
+            emit_get_local_address(TOTAL_LOCAL_SIZE);
+            let initializer: Expr = parse_expr();
+            make_rvalue(initializer, type);
+            emit_store(size);
+        }
+        expect_token(TOK_SEMICOLON);
+        LOCALS[LOCAL_COUNT].offset = TOTAL_LOCAL_SIZE;
+        LOCALS[LOCAL_COUNT].name = name;
+        LOCALS[LOCAL_COUNT].type = type;
+        LOCALS[LOCAL_COUNT].is_param = 0;
+        LOCAL_COUNT = LOCAL_COUNT + 1;
+        return 0;
+    }
+    if CURRENT_TOKEN.type == TOK_IF {
+        advance_token();
+        let cond: Expr = parse_expr();
+        make_rvalue(cond, make_int_ty());
+        let fix_addr: int = emit_jf(0);
+        assert_block_start();
+        parse_statement();
+        let end_addr: int = current_emitter_address();
+        emit_jump_fix(fix_addr, end_addr);
+        return 0;
+    }
+    if CURRENT_TOKEN.type == TOK_LOOP {
+        advance_token();
+        let start_address: int = current_emitter_address();
+        assert_block_start();
+        parse_statement();
+        emit_jmp(start_address);
+        return 0;
+    }
+    if CURRENT_TOKEN.type == TOK_RETURN {
+        advance_token();
+        // get address of return slot
+        emit_get_param_address(TOTAL_PARAM_SIZE);
+        let value: Expr = parse_expr();
+        let current_function: int = FUNCTION_COUNT - 1;
+        let return_type: Type = FUNCTIONS[current_function].return_type;
+        make_rvalue(value, return_type);
+        emit_store(type_size(return_type));
+        emit_pop(TOTAL_LOCAL_SIZE);
+        emit_ret();
+        expect_token(TOK_SEMICOLON);
+        return 0;
+    }
+    let expr: Expr = parse_expr();
+    expect_token(TOK_SEMICOLON);
+    if expr.kind == EXPR_LVALUE {
+        emit_pop(PTR_SIZE);
+        return 0;
+    }
+    let size: int = type_size(expr.type);
+    emit_pop(size);
+    return 0;
+}
+
+fn parse_function_args() -> int {
+    let args: int = 0;
+    TOTAL_PARAM_SIZE = 0;
+    LOCAL_COUNT = 0;
+    TOTAL_LOCAL_SIZE = 0;
+    loop {
+        if CURRENT_TOKEN.type == TOK_RIGHT_PAREN {
+            advance_token();
+            LOCAL_COUNT = args;
+            return 0;
+        }
+        if args == MAX_FUNCTION_ARGS {
+            abort(ERR_TOO_MANY);
+        }
+        let name: Ident = parse_name();
+        expect_token(TOK_COLON);
+        let type: Type = parse_type();
+        FUNCTIONS[FUNCTION_COUNT].arg_names[args] = name;
+        FUNCTIONS[FUNCTION_COUNT].arg_types[args] = type;
+        LOCALS[args].name = name;
+        LOCALS[args].type = type;
+        LOCALS[args].is_param = 1;
+        args = args + 1;
+        FUNCTIONS[FUNCTION_COUNT].args = args;
+        if CURRENT_TOKEN.type == TOK_RIGHT_PAREN {
+            advance_token();
+            LOCAL_COUNT = args;
+            return 0;
+        }
+        expect_token(TOK_COMMA);
+    }
+}
+
+fn calculate_param_offsets() -> int {
+    let index: int = LOCAL_COUNT;
+    let offset: int = 0;
+    TOTAL_PARAM_SIZE = 0;
+    loop {
+        if index == 0 {
+            return 0;
+        }
+        index = index - 1;
+        LOCALS[index].offset = offset;
+        let size: int = type_size(LOCALS[index].type);
+        offset = offset + size;
+        TOTAL_PARAM_SIZE = TOTAL_PARAM_SIZE + size;
+    }
+}
+
+fn parse_function() -> int {
+    if FUNCTION_COUNT == MAX_FUNCTIONS {
+        abort(ERR_TOO_MANY);
+    }
+    advance_token();
+    FUNCTIONS[FUNCTION_COUNT].name = peek_name();
+    let existing: int = find_function_opt(FUNCTIONS[FUNCTION_COUNT].name);
+    if existing != MAX_FUNCTIONS {
+        abort(ERR_MULTIPLE_DEFS);
+    }
+    advance_token();
+    expect_token(TOK_LEFT_PAREN);
+    parse_function_args();
+    calculate_param_offsets();
+    expect_token(TOK_ARROW);
+    FUNCTIONS[FUNCTION_COUNT].arg_size = TOTAL_PARAM_SIZE;
+    FUNCTIONS[FUNCTION_COUNT].return_type = parse_type();
+    FUNCTIONS[FUNCTION_COUNT].addr = current_emitter_address();
+    // increase function count now, so that we can
+    // call this function recursively inside it
+    FUNCTION_COUNT = FUNCTION_COUNT + 1;
+    assert_block_start();
+    emit_function_prologue();
+    parse_statement();
+    emit_ret();
+    return 0;
+}
+
+fn does_field_exist(strukt: Struct, field: Ident) -> int {
+    let index: int = strukt.field_count;
+    loop {
+        if index == 0 {
+            return 0;
+        }
+        index = index - 1;
+        if ident_eq(field, strukt.fields[index].name) {
+            return 1;
+        }
+    }
+}
+
+fn parse_struct() -> int {
+    if STRUCT_COUNT == MAX_STRUCTS {
+        abort(ERR_TOO_MANY);
+    }
+    advance_token();
+    STRUCTS[STRUCT_COUNT].name = peek_name();
+    let existing: int = find_struct_opt(STRUCTS[STRUCT_COUNT].name);
+    if existing != MAX_STRUCTS {
+        abort(ERR_MULTIPLE_DEFS);
+    }
+    advance_token();
+    expect_token(TOK_LEFT_BRACE);
+    let fields: int = 0;
+    let struct_size: int = 0;
+    loop {
+        if CURRENT_TOKEN.type == TOK_RIGHT_BRACE {
+            advance_token();
+            STRUCTS[STRUCT_COUNT].field_count = fields;
+            STRUCTS[STRUCT_COUNT].size = struct_size;
+            STRUCT_COUNT = STRUCT_COUNT + 1;
+            return 0;
+        }
+        if fields == MAX_STRUCT_FIELDS {
+            abort(ERR_TOO_MANY);
+        }
+        let field_name: Ident = peek_name();
+        if does_field_exist(STRUCTS[STRUCT_COUNT], field_name) {
+            abort(ERR_MULTIPLE_DEFS);
+        }
+        advance_token();
+        expect_token(TOK_COLON);
+        let field_type: Type = parse_type();
+        STRUCTS[STRUCT_COUNT].fields[fields].name = field_name;
+        STRUCTS[STRUCT_COUNT].fields[fields].type = field_type;
+        STRUCTS[STRUCT_COUNT].fields[fields].offset = struct_size;
+        struct_size = struct_size + type_size(field_type);
+        fields = fields + 1;
+        // make last comma optional - check for
+        // right brace before checking for comma
+        if CURRENT_TOKEN.type == TOK_RIGHT_BRACE {
+            advance_token();
+            STRUCTS[STRUCT_COUNT].field_count = fields;
+            STRUCTS[STRUCT_COUNT].size = struct_size;
+            STRUCT_COUNT = STRUCT_COUNT + 1;
+            return 0;
+        }
+        expect_token(TOK_COMMA);
+    }
+}
+
+fn does_static_exist(name: Ident) -> int {
+    let index: int = STATIC_COUNT;
+    loop {
+        if index == 0 {
+            return 0;
+        }
+        index = index - 1;
+        if ident_eq(STATICS[index].name, name) {
+            return 1;
+        }
+    }
+}
+
+fn parse_static() -> int {
+    if STATIC_COUNT == MAX_STATICS {
+        abort(ERR_TOO_MANY);
+    }
+    advance_token();
+    STATICS[STATIC_COUNT].name = peek_name();
+    if does_static_exist(STATICS[STATIC_COUNT].name) {
+        abort(ERR_MULTIPLE_DEFS);
+    }
+    advance_token();
+    expect_token(TOK_COLON);
+    STATICS[STATIC_COUNT].type = parse_type();
+    if CURRENT_TOKEN.type == TOK_SEMICOLON {
+        advance_token();
+        let size: int = type_size(STATICS[STATIC_COUNT].type);
+        STATICS[STATIC_COUNT].addr = emit_zero_static(size);
+        STATIC_COUNT = STATIC_COUNT + 1;
+        return 0;
+    }
+    abort(ERR_STATIC_INITIALIZER);
+    return 0;
+}
+
+fn does_const_exist(name: Ident) -> int {
+    let index: int = CONST_COUNT;
+    loop {
+        if index == 0 {
+            return 0;
+        }
+        index = index - 1;
+        if ident_eq(CONSTS[index].name, name) {
+            return 1;
+        }
+    }
+}
+
+fn parse_const() -> int {
+    if CONST_COUNT == MAX_CONSTS {
+        abort(ERR_TOO_MANY);
+    }
+    advance_token();
+    CONSTS[CONST_COUNT].name = peek_name();
+    if does_static_exist(CONSTS[CONST_COUNT].name) {
+        abort(ERR_MULTIPLE_DEFS);
+    }
+    if does_const_exist(CONSTS[CONST_COUNT].name) {
+        abort(ERR_MULTIPLE_DEFS);
+    }
+    advance_token();
+    expect_token(TOK_COLON);
+    expect_token(TOK_INT); // for now only int constants
+    expect_token(TOK_EQ);
+    CONSTS[CONST_COUNT].value = parse_const_value();
+    expect_token(TOK_SEMICOLON);
+    CONST_COUNT = CONST_COUNT + 1;
+    return 0;
+}
+
+fn parse_item() -> int {
+    if CURRENT_TOKEN.type == TOK_STATIC {
+        parse_static();
+        return 0;
+    }
+    if CURRENT_TOKEN.type == TOK_CONST {
+        parse_const();
+        return 0;
+    }
+    if CURRENT_TOKEN.type == TOK_STRUCT {
+        parse_struct();
+        return 0;
+    }
+    if CURRENT_TOKEN.type == TOK_FN {
+        parse_function();
+        return 0;
+    }
+    abort(ERR_UNEXPECTED_TOKEN);
+    return 0;
+}
+
+fn parse_file() -> int {
+    advance_char();
+    CURRENT_LINE = 1;
+    CURRENT_COLUMN = 1;
+    advance_token();
+    loop {
+        if CURRENT_TOKEN.type == TOK_EOF {
+            return 0;
+        }
+        parse_item();
+    }
+}
+
+fn make_exit_syscall() -> int {
+    let f: Function;
+    let name: Ident;
+    name.len = 14;
+    name.buf[0] = 95; // '_'
+    name.buf[1] = 95; // '_'
+    name.buf[2] = 115; // 's'
+    name.buf[3] = 121; // 'y'
+    name.buf[4] = 115; // 's'
+    name.buf[5] = 99; // 'c'
+    name.buf[6] = 97; // 'a'
+    name.buf[7] = 108; // 'l'
+    name.buf[8] = 108; // 'l'
+    name.buf[9] = 95; // '_'
+    name.buf[10] = 101; // 'e'
+    name.buf[11] = 120; // 'x'
+    name.buf[12] = 105; // 'i'
+    name.buf[13] = 116; // 't'
+    f.name = name;
+    f.args = 1;
+    f.arg_types[0] = make_int_ty();
+    f.arg_size = 8;
+    f.return_type = make_int_ty();
+    f.addr = current_emitter_address();
+    FUNCTIONS[FUNCTION_COUNT] = f;
+    FUNCTION_COUNT = FUNCTION_COUNT + 1;
+
+    emit_code_bytes(0x488B8424, 4); // mov rax, [rsp + 8] - prefix
+    emit_code_dword(8); // mov rax, [rsp + 8] - offset
+    emit_code_byte(0x50); // push rax
+    emit_code_byte(0x5B); // pop rbx
+    emit_code_bytes(0x4831C0, 3); // xor rax, rax
+    emit_code_bytes(0x0F05, 2); // syscall
+    emit_code_byte(0xC3); // ret
+    // while `ret` is not strictly necessary, it makes
+    // it a bit easier to see function positions
+
+    return 0;
+}
+
+fn make_read_syscall() -> int {
+    let f: Function;
+    let name: Ident;
+    name.len = 14;
+    name.buf[0] = 95; // '_'
+    name.buf[1] = 95; // '_'
+    name.buf[2] = 115; // 's'
+    name.buf[3] = 121; // 'y'
+    name.buf[4] = 115; // 's'
+    name.buf[5] = 99; // 'c'
+    name.buf[6] = 97; // 'a'
+    name.buf[7] = 108; // 'l'
+    name.buf[8] = 108; // 'l'
+    name.buf[9] = 95; // '_'
+    name.buf[10] = 114; // 'r'
+    name.buf[11] = 101; // 'e'
+    name.buf[12] = 97; // 'a'
+    name.buf[13] = 100; // 'd'
+    f.name = name;
+    f.args = 0;
+    f.arg_size = 0;
+    f.return_type = make_int_ty();
+    f.addr = current_emitter_address();
+    FUNCTIONS[FUNCTION_COUNT] = f;
+    FUNCTION_COUNT = FUNCTION_COUNT + 1;
+
+    emit_code_bytes(0x48B8, 2); // mov rax, 1 - prefix
+    emit_code_quad(1); // mov rax, 1 - value
+    emit_code_bytes(0x0F05, 2); // syscall
+    emit_code_bytes(0x48899C24, 4); // mov [rsp + 8], rbx - prefix
+    emit_code_dword(8); // mov [rsp + 8], rbx - offset
+    emit_code_byte(0xC3); // ret
+    
+    return 0;
+}
+
+fn make_write_syscall() -> int {
+    let f: Function;
+    let name: Ident;
+    name.len = 15;
+    name.buf[0] = 95; // '_'
+    name.buf[1] = 95; // '_'
+    name.buf[2] = 115; // 's'
+    name.buf[3] = 121; // 'y'
+    name.buf[4] = 115; // 's'
+    name.buf[5] = 99; // 'c'
+    name.buf[6] = 97; // 'a'
+    name.buf[7] = 108; // 'l'
+    name.buf[8] = 108; // 'l'
+    name.buf[9] = 95; // '_'
+    name.buf[10] = 119; // 'w'
+    name.buf[11] = 114; // 'r'
+    name.buf[12] = 105; // 'i'
+    name.buf[13] = 116; // 't'
+    name.buf[14] = 101; // 'e'
+    f.name = name;
+    f.args = 1;
+    f.arg_types[0] = make_int_ty();
+    f.arg_size = 8;
+    f.return_type = make_int_ty();
+    f.addr = current_emitter_address();
+    FUNCTIONS[FUNCTION_COUNT] = f;
+    FUNCTION_COUNT = FUNCTION_COUNT + 1;
+
+    emit_code_bytes(0x488B8424, 4); // mov rax, [rsp + 8] - prefix
+    emit_code_dword(8); // mov rax, [rsp + 8] - offset
+    emit_code_byte(0x50); // push rax
+    emit_code_byte(0x5B); // pop rbx
+    emit_code_bytes(0x48B8, 2); // mov rax, 1 - prefix
+    emit_code_quad(2); // mov rax, 2 - value
+    emit_code_bytes(0x0F05, 2); // syscall
+    emit_code_byte(0xC3); // ret
+    
+    return 0;
+}
+
+fn fix_main(fix_pos: int) -> int {
+    let i: int = 0;
+    loop {
+        if i == FUNCTION_COUNT {
+            abort(ERR_NO_MAIN);
+        }
+        let name: Ident = FUNCTIONS[i].name;
+        if name.len == 4 {
+            if name.buf[0] == 109 { // 'm'
+                if name.buf[1] == 97 { // 'a'
+                    if name.buf[2] == 105 { // 'i'
+                        if name.buf[3] == 110 { // 'n'
+                            let addr: int = FUNCTIONS[i].addr;
+                            emit_jump_fix(fix_pos, addr);
+                            return 0;
+                        }
+                    }
+                }
+            }
+        }
+        i = i + 1;
+    }
+}
+
+fn main() -> int {
+    let main_address: int = emit_jmp(0);
+    make_exit_syscall();
+    make_read_syscall();
+    make_write_syscall();
+
+    parse_file();
+
+    fix_main(main_address);
+
+    emit_flush_code();
+
+    __syscall_exit(0);
+    return 0;
+}

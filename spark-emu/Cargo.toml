@@ -1,0 +1,7 @@
+[package]
+name = "spark-emu"
+version = "0.1.0"
+authors = ["djade <djadenkus@gmail.com>"]
+
+[dependencies]
+structopt = "0.2.8"
